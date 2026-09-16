@@ -18,6 +18,28 @@ function download(name, data, type) {
   URL.revokeObjectURL(a.href);
 }
 
+// Per-browser convenience state (which panels are open, whether the drawer is out).
+function usePersisted(key, initial) {
+  const [value, setValue] = useState(initial);
+  useEffect(() => {
+    try { const raw = localStorage.getItem(key); if (raw != null) setValue(JSON.parse(raw)); } catch {}
+  }, [key]);
+  const set = useCallback((next) => {
+    setValue((prev) => {
+      const v = typeof next === 'function' ? next(prev) : next;
+      try { localStorage.setItem(key, JSON.stringify(v)); } catch {}
+      return v;
+    });
+  }, [key]);
+  return [value, set];
+}
+
+const Chevron = ({ open }) => (
+  <svg className={`chev ${open ? 'open' : ''}`} width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+    <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
 function Seg({ value, onChange, options }) {
   return (
     <div className="seg" role="tablist">
@@ -28,6 +50,20 @@ function Seg({ value, onChange, options }) {
         </button>
       ))}
     </div>
+  );
+}
+
+// A rail section that folds. When closed it shows a one-line summary so it still reads at a glance.
+function Panel({ id, title, summary, open, onToggle, children }) {
+  return (
+    <section className={`panel ${open ? '' : 'closed'}`}>
+      <button type="button" className="head toggle" onClick={() => onToggle(id)} aria-expanded={open} aria-controls={`${id}-body`}>
+        <span className="eyebrow">{title}</span>
+        {!open && summary && <span className="summary">{summary}</span>}
+        <Chevron open={open} />
+      </button>
+      <div id={`${id}-body`} className="body" hidden={!open}>{children}</div>
+    </section>
   );
 }
 
@@ -46,6 +82,8 @@ export default function Page() {
   const [usage, setUsage] = useState({ input: 0, output: 0 });
   const [log, setLog] = useState([]);
   const [tab, setTab] = useState('request');
+  const [panels, setPanels] = usePersisted('tp_panels', { key: true, picture: true, model: true });
+  const [drawer, setDrawer] = usePersisted('tp_drawer', false);
   const stopRef = useRef(false);
   const canvasRef = useRef(null);
 
@@ -56,6 +94,8 @@ export default function Page() {
   useEffect(() => {
     try { localStorage.setItem('typesafe_api_key', apiKey); } catch {}
   }, [apiKey]);
+
+  const togglePanel = useCallback((id) => setPanels((p) => ({ ...p, [id]: !p[id] })), [setPanels]);
 
   const chans = channelsFor(alpha);
   const state = useMemo(() => buildState(expectation, size, chans, prompt), [expectation, size, chans, prompt]);
@@ -108,9 +148,10 @@ export default function Page() {
   }, [answers, pixels, size, chans]);
 
   async function run() {
-    if (!apiKey.trim()) { addLog('Add your TypeSafe API key first.'); return; }
+    if (!apiKey.trim()) { addLog('Add your TypeSafe API key first.'); setTab('log'); setDrawer(true); return; }
     setRunning(true);
     setStopped(false);
+    setTab('log');
     stopRef.current = false;
 
     let cur = Math.max(1, Math.floor(Number(chunk)) || 200);
@@ -183,125 +224,129 @@ export default function Page() {
   const requests = Math.ceil(keys.length / Math.max(1, Math.floor(Number(chunk)) || 1));
   const pct = keys.length ? Math.round((answeredCount / keys.length) * 100) : 0;
   const decodeInfo = DECODES.find((d) => d.id === decode);
+  const promptInfo = PROMPTS.find((p) => p.id === prompt);
   const statusClass = running ? 'painting' : complete ? 'complete' : '';
   const statusText = running ? 'painting' : complete ? 'complete' : stopped ? 'paused' : answeredCount ? 'partial' : 'idle';
   const fmt = (n) => n.toLocaleString();
 
   return (
-    <main className="wrap">
+    <main className={`wrap ${drawer ? 'drawer-open' : ''}`}>
       <header className="masthead">
         <div className="wordmark">
           <h1>TypeSafe Pixels</h1>
           <p>Jev decides every channel of every pixel. Code only asks the questions and draws the answers.</p>
         </div>
-        <span className={`status ${statusClass}`}><i /> {statusText}</span>
+        <div className="row">
+          <span className={`status ${statusClass}`}><i /> {statusText}</span>
+          <button type="button" className={`iconbtn ${drawer ? 'active' : ''}`} onClick={() => setDrawer((d) => !d)}
+                  aria-pressed={drawer} aria-controls="drawer" title={drawer ? 'Hide inspector' : 'Show inspector'}>
+            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+            Inspect{log.length ? <span className="badge">{log.length}</span> : null}
+          </button>
+        </div>
       </header>
 
-      <div className="grid">
+      <div className={`grid ${drawer ? 'with-drawer' : ''}`}>
         {/* ---------------- controls rail ---------------- */}
-        <div className="stack">
-          <section className="panel">
-            <div className="head"><h2 className="eyebrow">Key</h2></div>
-            <div className="body">
-              <div className="field">
-                <label htmlFor="key">TypeSafe API key</label>
-                <div className="row">
-                  <input id="key" className="mono grow" type={showKey ? 'text' : 'password'} value={apiKey} disabled={running}
-                         onChange={(e) => setApiKey(e.target.value)} placeholder="api…" autoComplete="off" />
-                  <button className="small ghost" type="button" onClick={() => setShowKey((v) => !v)}>
-                    {showKey ? 'Hide' : 'Show'}
-                  </button>
-                </div>
-                <span className="hint">Stays in this browser. Sent per request through this app's proxy, never stored on a server.</span>
+        <div className="stack rail">
+          <Panel id="key" title="Key" open={panels.key} onToggle={togglePanel}
+                 summary={apiKey ? 'key set' : 'no key yet'}>
+            <div className="field">
+              <label htmlFor="key">TypeSafe API key</label>
+              <div className="row">
+                <input id="key" className="mono grow" type={showKey ? 'text' : 'password'} value={apiKey} disabled={running}
+                       onChange={(e) => setApiKey(e.target.value)} placeholder="api…" autoComplete="off" />
+                <button className="small ghost" type="button" onClick={() => setShowKey((v) => !v)}>
+                  {showKey ? 'Hide' : 'Show'}
+                </button>
               </div>
+              <span className="hint">Stays in this browser. Sent per request through this app's proxy, never stored on a server.</span>
             </div>
-          </section>
+          </Panel>
 
-          <section className="panel">
-            <div className="head"><h2 className="eyebrow">Picture</h2></div>
-            <div className="body">
-              <div className="field">
-                <label htmlFor="exp">Image expectation</label>
-                <input id="exp" type="text" value={expectation} disabled={running}
-                       onChange={(e) => setExpectation(e.target.value)} />
-                <span className="hint">The only words the model gets about the picture. Name the features you want placed (a sun on the horizon, a strip of sand) and it has something to put where.</span>
-              </div>
-
-              <div className="field">
-                <label htmlFor="size">Grid</label>
-                <select id="size" value={size} disabled={running} onChange={(e) => setSize(Number(e.target.value))}>
-                  {SIZES.map((s) => (
-                    <option key={s} value={s}>{s} × {s} · {fmt(s * s)} pixels · {fmt(s * s * chans.length)} questions</option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="field" style={{ marginTop: 14 }}>
-                <label>Channels</label>
-                <div className="chips">
-                  {['R', 'G', 'B', 'A'].map((ch) => (
-                    <span key={ch} className={`chip ${chans.includes(ch) ? '' : 'off'}`}>
-                      <i style={{ background: CHANNEL_COLOR[ch] }} />{ch}
-                    </span>
-                  ))}
-                </div>
-                <label className="check" htmlFor="alpha" style={{ marginTop: 10 }}>
-                  <input id="alpha" type="checkbox" checked={alpha} disabled={running}
-                         onChange={(e) => setAlpha(e.target.checked)} />
-                  <span>Ask for alpha (A) too<span className="hint">Pixel art is opaque; leaving it off saves a quarter of the questions.</span></span>
-                </label>
-              </div>
+          <Panel id="picture" title="Picture" open={panels.picture} onToggle={togglePanel}
+                 summary={`${size} × ${size} · ${chans}`}>
+            <div className="field">
+              <label htmlFor="exp">Image expectation</label>
+              <input id="exp" type="text" value={expectation} disabled={running}
+                     onChange={(e) => setExpectation(e.target.value)} />
+              <span className="hint">The only words the model gets about the picture. Name the features you want placed (a sun on the horizon, a strip of sand) and it has something to put where.</span>
             </div>
-          </section>
 
-          <section className="panel">
-            <div className="head"><h2 className="eyebrow">Model</h2></div>
-            <div className="body">
-              <div className="field">
-                <label htmlFor="prompt">Prompt style</label>
-                <select id="prompt" value={prompt} disabled={running} onChange={(e) => setPrompt(e.target.value)}>
-                  {PROMPTS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
-                </select>
-              </div>
-
-              <div className="field">
-                <label htmlFor="chunk">Questions per request</label>
-                <input id="chunk" className="mono" type="number" min="1" max="2000" value={chunk} disabled={running}
-                       onChange={(e) => setChunk(e.target.value)} />
-                <span className="hint">200 measured safe (~20k tokens). Halves automatically if TypeSafe says a request is too big.</span>
-              </div>
-
-              <div className="field" style={{ marginTop: 14 }}>
-                <label>Answer scale</label>
-                <div className="ramp" aria-hidden="true">
-                  {LEVELS.map((v) => { const g = Math.round(((Number(v) - 1) / 255) * 255); return <span key={v} style={{ background: `rgb(${g},${g},${g})` }} />; })}
-                </div>
-                <div className="ramp-labels">{LEVELS.map((v) => <span key={v}>{v}</span>)}</div>
-                <span className="hint">Ten Score anchors from 1 to 256, the most levels TypeSafe allows. Jev returns a probability over them per channel.</span>
-              </div>
-
-              <div className="divider" />
-
-              <details className="state">
-                <summary>What the model is told</summary>
-                <div className="text">{state}</div>
-              </details>
-
-              <div className="row" style={{ marginTop: 16 }}>
-                {!running
-                  ? <button className="primary" onClick={run} disabled={!keys.length}>
-                      {answeredCount > 0 && !complete ? 'Continue run' : complete ? 'Run again' : 'Run with TypeSafe'}
-                    </button>
-                  : <button className="primary" onClick={() => { stopRef.current = true; }}>Stop</button>}
-                <button className="ghost" onClick={() => { setAnswers({}); setUsage({ input: 0, output: 0 }); setStopped(false); addLog('Cleared answers.'); }} disabled={running || !answeredCount}>Reset</button>
-              </div>
+            <div className="field">
+              <label htmlFor="size">Grid</label>
+              <select id="size" value={size} disabled={running} onChange={(e) => setSize(Number(e.target.value))}>
+                {SIZES.map((s) => (
+                  <option key={s} value={s}>{s} × {s} · {fmt(s * s)} pixels · {fmt(s * s * chans.length)} questions</option>
+                ))}
+              </select>
             </div>
-          </section>
+
+            <div className="field" style={{ marginTop: 14 }}>
+              <label>Channels</label>
+              <div className="chips">
+                {['R', 'G', 'B', 'A'].map((ch) => (
+                  <span key={ch} className={`chip ${chans.includes(ch) ? '' : 'off'}`}>
+                    <i style={{ background: CHANNEL_COLOR[ch] }} />{ch}
+                  </span>
+                ))}
+              </div>
+              <label className="check" htmlFor="alpha" style={{ marginTop: 10 }}>
+                <input id="alpha" type="checkbox" checked={alpha} disabled={running}
+                       onChange={(e) => setAlpha(e.target.checked)} />
+                <span>Ask for alpha (A) too<span className="hint">Pixel art is opaque; leaving it off saves a quarter of the questions.</span></span>
+              </label>
+            </div>
+          </Panel>
+
+          <Panel id="model" title="Model" open={panels.model} onToggle={togglePanel}
+                 summary={`${prompt} · ${chunk}/request`}>
+            <div className="field">
+              <label htmlFor="prompt">Prompt style</label>
+              <select id="prompt" value={prompt} disabled={running} onChange={(e) => setPrompt(e.target.value)}>
+                {PROMPTS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+              </select>
+            </div>
+
+            <div className="field">
+              <label htmlFor="chunk">Questions per request</label>
+              <input id="chunk" className="mono" type="number" min="1" max="2000" value={chunk} disabled={running}
+                     onChange={(e) => setChunk(e.target.value)} />
+              <span className="hint">200 measured safe (~20k tokens). Halves automatically if TypeSafe says a request is too big.</span>
+            </div>
+
+            <div className="field" style={{ marginTop: 14 }}>
+              <label>Answer scale</label>
+              <div className="ramp" aria-hidden="true">
+                {LEVELS.map((v) => { const g = Math.round(((Number(v) - 1) / 255) * 255); return <span key={v} style={{ background: `rgb(${g},${g},${g})` }} />; })}
+              </div>
+              <div className="ramp-labels">{LEVELS.map((v) => <span key={v}>{v}</span>)}</div>
+              <span className="hint">Ten Score anchors from 1 to 256, the most levels TypeSafe allows. Jev returns a probability over them per channel.</span>
+            </div>
+
+            <div className="divider" />
+
+            <details className="state">
+              <summary>What the model is told</summary>
+              <div className="text">{state}</div>
+            </details>
+          </Panel>
+
+          <div className="actions">
+            {!running
+              ? <button className="primary" onClick={run} disabled={!keys.length}>
+                  {answeredCount > 0 && !complete ? 'Continue run' : complete ? 'Run again' : 'Run with TypeSafe'}
+                </button>
+              : <button className="primary" onClick={() => { stopRef.current = true; }}>Stop</button>}
+            <button className="ghost" onClick={() => { setAnswers({}); setUsage({ input: 0, output: 0 }); setStopped(false); addLog('Cleared answers.'); }} disabled={running || !answeredCount}>Reset</button>
+          </div>
         </div>
 
-        {/* ---------------- work surface ---------------- */}
-        <div className="stack">
-          <section className="panel">
+        {/* ---------------- stage ---------------- */}
+        <div className="stack work">
+          <section className="panel drawing">
             <div className="head">
               <h2 className="eyebrow">Drawing · {size} × {size}</h2>
               <div className="row">
@@ -309,7 +354,7 @@ export default function Page() {
                 <button className="small" onClick={downloadPng} disabled={!answeredCount}>Download PNG</button>
               </div>
             </div>
-            <div className="body">
+            <div className="body stage">
               <div className="plate"><canvas ref={canvasRef} aria-label="Jev's pixels" /></div>
               <div className="row between" style={{ marginTop: 14, marginBottom: 6 }}>
                 <span className="hint" style={{ fontSize: 12, color: 'var(--muted)' }}>
@@ -319,19 +364,23 @@ export default function Page() {
               </div>
               <div className="progress"><i style={{ width: `${pct}%` }} /></div>
             </div>
-            <div className="stats" style={{ borderRadius: 0, borderLeft: 0, borderRight: 0, borderBottom: 0 }}>
+            <div className="stats">
               <div className="stat"><b>{fmt(size * size)}</b><span>pixels</span></div>
-              <div className="stat"><b>{fmt(answeredCount)}<span style={{ display: 'inline', color: 'var(--faint)', fontSize: 13, letterSpacing: 0, textTransform: 'none' }}> / {fmt(keys.length)}</span></b><span>channels answered</span></div>
+              <div className="stat"><b>{fmt(answeredCount)}<small> / {fmt(keys.length)}</small></b><span>channels answered</span></div>
               <div className="stat"><b>{fmt(requests)}</b><span>requests</span></div>
               <div className="stat"><b>{usage.input ? fmt(usage.input) : '—'}</b><span>tokens in{usage.output ? ` · ${fmt(usage.output)} out` : ''}</span></div>
             </div>
           </section>
+        </div>
 
+        {/* ---------------- inspector drawer ---------------- */}
+        {drawer && <div className="scrim" onClick={() => setDrawer(false)} aria-hidden="true" />}
+        <aside id="drawer" className={`drawer ${drawer ? 'open' : ''}`} aria-label="Inspector" aria-hidden={!drawer}>
           <section className="panel fill">
             <div className="head">
               <Seg value={tab} onChange={setTab} options={[
-                { id: 'request', label: 'Request JSON' },
-                { id: 'pixels', label: 'Pixel JSON' },
+                { id: 'request', label: 'Request' },
+                { id: 'pixels', label: 'Pixels' },
                 { id: 'log', label: log.length ? `Log · ${log.length}` : 'Log' },
               ]} />
               <div className="row">
@@ -350,6 +399,7 @@ export default function Page() {
                 {tab === 'log' && (
                   <button className="small ghost" onClick={() => setLog([])} disabled={!log.length}>Clear</button>
                 )}
+                <button className="small ghost close" onClick={() => setDrawer(false)} aria-label="Hide inspector">✕</button>
               </div>
             </div>
             {tab !== 'log' && (
@@ -365,7 +415,7 @@ export default function Page() {
               ? <div className="log">{log.length ? log.map((l, i) => <div key={i}>{l}</div>) : <div>Nothing yet. Add a key and press Run.</div>}</div>
               : <pre>{tab === 'request' ? preview(requestJson) : answeredCount ? preview(pixelJson) : ' '}</pre>}
           </section>
-        </div>
+        </aside>
       </div>
     </main>
   );
