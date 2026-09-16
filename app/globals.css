@@ -125,6 +125,9 @@ button, input, select { font: inherit; color: inherit; }
 
 .actions { display: flex; gap: 8px; padding: 4px 2px 8px; }
 
+/* the composition brief, shown beside the drawing title */
+.briefchips { display: inline-flex; align-items: center; gap: 6px; padding-left: 12px; border-left: 1px solid var(--line); flex-wrap: wrap; }
+
 /* ---------- controls ---------- */
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field + .field { margin-top: 14px; }

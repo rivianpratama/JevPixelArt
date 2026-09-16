@@ -31,6 +31,19 @@ in a pixel-art image. The code only builds the questions and draws the answers.
   first), `bold` (tuned + a pixel-art style instruction). Measured saturation at
   16×16, mean-decoded: 29 → 79 → 85; bold + sharpen³ ≈ 163. The scene features
   themselves (a sun, a sand strip) come from the **image expectation** field.
+- **Shared context.** TypeSafe scores every question on its own, so no pixel
+  knows what another got, batched or not. Measured: neighbours across a batch
+  boundary are exactly as consistent as neighbours inside one, so batching is
+  not the problem; the lack of any joint decision is. By default the app first
+  asks Jev five scene-agnostic composition questions, once (where the main
+  boundary between the two largest areas falls; whether there is a focal
+  object, where, how big) and puts the answers into every request's state as
+  about 60 tokens of words with pixel ranges. Measured: consistent placement
+  (a crisp boundary on the agreed row, a centred focal region) for +0.6%
+  tokens at 32×32 and +1.4% at 16×16. A numeric colour sketch in the state was
+  tried first and rejected: with per-question block tags it tiles the picture
+  at the block size (seam ratio 16–21×); without them the model mis-maps pixel
+  rows onto sketch rows and scrambles.
 
 ## Why the browser loops instead of the server
 

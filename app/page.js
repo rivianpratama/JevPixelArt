@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  LEVELS, MODEL, PROMPTS, DECODES, channelsFor, buildState, buildQuestions, rebuild, requestJsonString,
+  LEVELS, MODEL, PROMPTS, DECODES, BRIEF_QUESTIONS, channelsFor, briefFromAnswers, buildBriefText,
+  buildState, buildQuestions, rebuild, requestJsonString,
 } from '../lib/pixels';
 
 const SIZES = [8, 12, 16, 24, 32, 48, 64];
@@ -32,6 +33,34 @@ function usePersisted(key, initial) {
     });
   }, [key]);
   return [value, set];
+}
+
+// Paint a pixel dict onto a canvas, nearest-neighbour. Unanswered pixels get a light checker.
+function paint(canvas, pixels, size, chans, answers, cssMax) {
+  const scale = Math.max(1, Math.floor(cssMax / size));
+  canvas.width = size * scale;
+  canvas.height = size * scale;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  for (let y = 1; y <= size; y++) {
+    for (let x = 1; x <= size; x++) {
+      const i = ((y - 1) * size + (x - 1)) * 4;
+      const done = [...chans].every((ch) => answers[`X${x} Y${y} ${ch}`]);
+      if (done) {
+        const p = pixels[`X${x} Y${y}`];
+        img.data[i] = p.R - 1; img.data[i + 1] = p.G - 1; img.data[i + 2] = p.B - 1; img.data[i + 3] = p.A - 1;
+      } else {
+        const g = (x + y) % 2 ? 224 : 236;
+        img.data[i] = g; img.data[i + 1] = g + 1; img.data[i + 2] = g + 3; img.data[i + 3] = 255;
+      }
+    }
+  }
+  const off = document.createElement('canvas');
+  off.width = size; off.height = size;
+  off.getContext('2d').putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
 }
 
 const Chevron = ({ open }) => (
@@ -74,12 +103,14 @@ export default function Page() {
   const [size, setSize] = useState(16);
   const [alpha, setAlpha] = useState(false);
   const [prompt, setPrompt] = useState('bold');
+  const [briefFirst, setBriefFirst] = useState(true);
   const [decode, setDecode] = useState('sharp3');
   const [chunk, setChunk] = useState(200);
+  const [brief, setBrief] = useState(null);        // { answers, brief, text } after phase 1
   const [answers, setAnswers] = useState({});
   const [running, setRunning] = useState(false);
   const [stopped, setStopped] = useState(false);
-  const [usage, setUsage] = useState({ input: 0, output: 0 });
+  const [usage, setUsage] = useState({ input: 0, output: 0, requests: 0 });
   const [log, setLog] = useState([]);
   const [tab, setTab] = useState('request');
   const [panels, setPanels] = usePersisted('tp_panels', { key: true, picture: true, model: true });
@@ -98,14 +129,16 @@ export default function Page() {
   const togglePanel = useCallback((id) => setPanels((p) => ({ ...p, [id]: !p[id] })), [setPanels]);
 
   const chans = channelsFor(alpha);
-  const state = useMemo(() => buildState(expectation, size, chans, prompt), [expectation, size, chans, prompt]);
+  const state = useMemo(() => buildState(expectation, size, chans, prompt, brief?.text ?? null), [expectation, size, chans, prompt, brief]);
   const questions = useMemo(() => buildQuestions(size, chans, prompt), [size, chans, prompt]);
   const keys = useMemo(() => Object.keys(questions), [questions]);
   const requestJson = useMemo(() => requestJsonString(state, questions), [state, questions]);
 
-  // Changing the picture, the grid or the prompt changes what every question means, so answers reset.
-  // Changing the decoder does not: it re-reads the answers you already paid for.
-  useEffect(() => { setAnswers({}); setUsage({ input: 0, output: 0 }); setStopped(false); }, [size, chans, expectation, prompt]);
+  // Changing the picture, the grid, the prompt or the brief setting changes what every question means,
+  // so answers and brief reset. Changing the decoder does not: it re-reads the answers you already paid for.
+  useEffect(() => {
+    setAnswers({}); setBrief(null); setUsage({ input: 0, output: 0, requests: 0 }); setStopped(false);
+  }, [size, chans, expectation, prompt, briefFirst]);
 
   const answeredCount = useMemo(() => keys.reduce((n, k) => n + (answers[k] ? 1 : 0), 0), [keys, answers]);
   const complete = keys.length > 0 && answeredCount === keys.length;
@@ -117,35 +150,65 @@ export default function Page() {
     setLog((l) => [...l.slice(-199), `[${t}] ${m}`]);
   }, []);
 
-  // Draw whatever Jev has answered so far. Unanswered pixels show as a light checker.
   useEffect(() => {
-    const c = canvasRef.current;
-    if (!c) return;
-    const scale = Math.max(1, Math.floor(512 / size));
-    c.width = size * scale;
-    c.height = size * scale;
-    const ctx = c.getContext('2d');
-    const img = ctx.createImageData(size, size);
-    for (let y = 1; y <= size; y++) {
-      for (let x = 1; x <= size; x++) {
-        const i = ((y - 1) * size + (x - 1)) * 4;
-        const done = [...chans].every((ch) => answers[`X${x} Y${y} ${ch}`]);
-        if (done) {
-          const p = pixels[`X${x} Y${y}`];
-          img.data[i] = p.R - 1; img.data[i + 1] = p.G - 1; img.data[i + 2] = p.B - 1; img.data[i + 3] = p.A - 1;
-        } else {
-          const g = (x + y) % 2 ? 224 : 236;
-          img.data[i] = g; img.data[i + 1] = g + 1; img.data[i + 2] = g + 3; img.data[i + 3] = 255;
-        }
+    if (canvasRef.current) paint(canvasRef.current, pixels, size, chans, answers, 512);
+  }, [answers, pixels, size, chans]);
+
+  // Send a set of questions against one state, in chunks that hold whole columns. Returns what was answered.
+  async function sendAll(stateText, qs, perCol, startChunk, have, isPaint) {
+    let cur = Math.max(perCol, Math.floor(startChunk / perCol) * perCol);
+    let local = { ...have };
+    const ks = Object.keys(qs);
+    const todo = ks.filter((k) => !local[k]);
+    let i = 0;
+    let delay = 2000;
+    while (i < todo.length && !stopRef.current) {
+      const batchKeys = todo.slice(i, i + cur);
+      const batch = {};
+      for (const k of batchKeys) batch[k] = qs[k];
+
+      let res, text;
+      try {
+        res = await fetch('/api/systemone', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-typesafe-key': apiKey.trim() },
+          body: JSON.stringify({ state: stateText, model: MODEL, questions: batch }),
+        });
+        text = await res.text();
+      } catch (e) {
+        addLog(`Network error: ${e.message}. Retrying in ${delay / 1000}s.`);
+        await sleep(delay); delay = Math.min(delay * 2, 60000);
+        continue;
+      }
+      if (res.status === 429 || res.status === 529) {
+        addLog(`${res.status} from TypeSafe. Backing off ${delay / 1000}s.`);
+        await sleep(delay); delay = Math.min(delay * 2, 60000);
+        continue;
+      }
+      if (res.status === 413 || (res.status === 400 && /token|too large|too long/i.test(text))) {
+        if (cur <= perCol) { addLog('Still too big at one column per request. Stopping.'); return { local, ok: false }; }
+        cur = Math.max(perCol, Math.floor(cur / 2 / perCol) * perCol);
+        addLog(`Too big for the API. Halving to ${cur} questions per request.`);
+        continue;
+      }
+      if (!res.ok) { addLog(`HTTP ${res.status}: ${text.slice(0, 300)}`); return { local, ok: false }; }
+
+      let data;
+      try { data = JSON.parse(text); } catch { addLog('Unreadable response from the API.'); return { local, ok: false }; }
+
+      local = { ...local, ...(data.answers || {}) };
+      i += batchKeys.length;
+      delay = 2000;
+      const u = data.usage || {};
+      setUsage((s) => ({ input: s.input + (u.input_tokens || 0), output: s.output + (u.output_tokens || 0), requests: s.requests + 1 }));
+      if (isPaint) {
+        const n = ks.reduce((c, k) => c + (local[k] ? 1 : 0), 0);
+        addLog(`${n}/${ks.length} answered · ${cur}/request · tokens in ${u.input_tokens ?? '?'} out ${u.output_tokens ?? '?'}`);
+        setAnswers(local);
       }
     }
-    const off = document.createElement('canvas');
-    off.width = size; off.height = size;
-    off.getContext('2d').putImageData(img, 0, 0);
-    ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, c.width, c.height);
-    ctx.drawImage(off, 0, 0, c.width, c.height);
-  }, [answers, pixels, size, chans]);
+    return { local, ok: !stopRef.current || i >= todo.length };
+  }
 
   async function run() {
     if (!apiKey.trim()) { addLog('Add your TypeSafe API key first.'); setTab('log'); setDrawer(true); return; }
@@ -154,57 +217,32 @@ export default function Page() {
     setTab('log');
     stopRef.current = false;
 
-    let cur = Math.max(1, Math.floor(Number(chunk)) || 200);
-    let local = { ...answers };
-    const todo = keys.filter((k) => !local[k]);
-    addLog(`Sending ${todo.length} questions (${size}×${size}, ${chans}, ${prompt}) in chunks of ${cur}.`);
+    let planText = brief?.text ?? null;
 
-    let i = 0;
-    let delay = 2000;
-    while (i < todo.length && !stopRef.current) {
-      const batchKeys = todo.slice(i, i + cur);
-      const batch = {};
-      for (const k of batchKeys) batch[k] = questions[k];
-
-      let res, text;
-      try {
-        res = await fetch('/api/systemone', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-typesafe-key': apiKey.trim() },
-          body: JSON.stringify({ state, model: MODEL, questions: batch }),
-        });
-        text = await res.text();
-      } catch (e) {
-        addLog(`Network error: ${e.message}. Retrying in ${delay / 1000}s.`);
-        await sleep(delay); delay = Math.min(delay * 2, 60000);
-        continue;
+    // Phase 1: the composition brief, once. Its ~60 tokens ride along in every paint request.
+    if (briefFirst && !brief) {
+      const pState = buildState(expectation, size, chans, prompt);
+      addLog('Deciding the composition: five questions, one request.');
+      const n = Object.keys(BRIEF_QUESTIONS).length;
+      const { local, ok } = await sendAll(pState, BRIEF_QUESTIONS, n, n, {}, false);
+      if (!ok || Object.keys(BRIEF_QUESTIONS).some((k) => !local[k])) {
+        if (stopRef.current) { setStopped(true); addLog('Stopped during the brief.'); }
+        setRunning(false); return;
       }
-
-      if (res.status === 429 || res.status === 529) {
-        addLog(`${res.status} from TypeSafe. Backing off ${delay / 1000}s.`);
-        await sleep(delay); delay = Math.min(delay * 2, 60000);
-        continue;
-      }
-      if (res.status === 413 || (res.status === 400 && /token|too large|too long/i.test(text))) {
-        if (cur <= 8) { addLog('Still too big at a chunk of 8. Stopping.'); break; }
-        cur = Math.floor(cur / 2);
-        addLog(`Too big for the API. Halving chunk to ${cur}.`);
-        continue;
-      }
-      if (!res.ok) { addLog(`HTTP ${res.status}: ${text.slice(0, 300)}`); break; }
-
-      let data;
-      try { data = JSON.parse(text); } catch { addLog('Unreadable response from the API.'); break; }
-
-      local = { ...local, ...(data.answers || {}) };
-      setAnswers(local);
-      i += batchKeys.length;
-      delay = 2000;
-      const u = data.usage || {};
-      setUsage((s) => ({ input: s.input + (u.input_tokens || 0), output: s.output + (u.output_tokens || 0) }));
-      const n = keys.reduce((c, k) => c + (local[k] ? 1 : 0), 0);
-      addLog(`${n}/${keys.length} answered · chunk ${cur} · tokens in ${u.input_tokens ?? '?'} out ${u.output_tokens ?? '?'}`);
+      const b = briefFromAnswers(local, size);
+      planText = buildBriefText(b, size);
+      setBrief({ answers: local, brief: b, text: planText });
+      addLog(`Composition: main boundary at row ${b.boundary_row}${b.focal
+        ? `; focal object at columns ${b.x1}–${b.x2}, rows ${b.y1}–${b.y2}` : '; no single focal object'}. `
+        + `About ${Math.round(planText.length / 4)} tokens added to each request.`);
     }
+
+    // Phase 2: the picture.
+    const fState = buildState(expectation, size, chans, prompt, planText);
+    const todo = keys.filter((k) => !answers[k]);
+    addLog(`Painting ${todo.length} questions (${size}×${size}, ${chans}, ${prompt}${planText ? ', with brief' : ''}).`);
+    const { local } = await sendAll(fState, questions, size * chans.length, Math.floor(Number(chunk)) || 200, answers, true);
+    setAnswers(local);
 
     if (stopRef.current) { setStopped(true); addLog('Stopped. Run again to continue where you left off.'); }
     else if (keys.every((k) => local[k])) addLog('Done. Jev has answered every pixel.');
@@ -221,13 +259,15 @@ export default function Page() {
     ? `${s.slice(0, 4000)}\n… ${(s.length / 1024).toFixed(0)} KB total. Use Copy or Download for the whole file.`
     : s);
 
-  const requests = Math.ceil(keys.length / Math.max(1, Math.floor(Number(chunk)) || 1));
+  const perCol = size * chans.length;
+  const effChunk = Math.max(perCol, Math.floor((Math.floor(Number(chunk)) || 200) / perCol) * perCol);
+  const requests = Math.ceil(keys.length / effChunk) + (briefFirst ? 1 : 0);
   const pct = keys.length ? Math.round((answeredCount / keys.length) * 100) : 0;
   const decodeInfo = DECODES.find((d) => d.id === decode);
-  const promptInfo = PROMPTS.find((p) => p.id === prompt);
   const statusClass = running ? 'painting' : complete ? 'complete' : '';
-  const statusText = running ? 'painting' : complete ? 'complete' : stopped ? 'paused' : answeredCount ? 'partial' : 'idle';
+  const statusText = running ? (briefFirst && !brief ? 'deciding' : 'painting') : complete ? 'complete' : stopped ? 'paused' : answeredCount ? 'partial' : 'idle';
   const fmt = (n) => n.toLocaleString();
+  const b = brief?.brief;
 
   return (
     <main className={`wrap ${drawer ? 'drawer-open' : ''}`}>
@@ -302,7 +342,7 @@ export default function Page() {
           </Panel>
 
           <Panel id="model" title="Model" open={panels.model} onToggle={togglePanel}
-                 summary={`${prompt} · ${chunk}/request`}>
+                 summary={`${prompt} · ${effChunk}/request${briefFirst ? ' · brief' : ''}`}>
             <div className="field">
               <label htmlFor="prompt">Prompt style</label>
               <select id="prompt" value={prompt} disabled={running} onChange={(e) => setPrompt(e.target.value)}>
@@ -310,11 +350,21 @@ export default function Page() {
               </select>
             </div>
 
-            <div className="field">
+            <label className="check" htmlFor="briefFirst">
+              <input id="briefFirst" type="checkbox" checked={briefFirst} disabled={running}
+                     onChange={(e) => setBriefFirst(e.target.checked)} />
+              <span>Decide the composition first<span className="hint">
+                Every question is scored on its own, so no pixel knows what another got. This asks Jev five quick
+                questions once (where the main boundary falls; whether there's a focal object, where, how big) and puts
+                the answers, about 60 tokens, into every request. Roughly +1% tokens; measured to make placement consistent.
+              </span></span>
+            </label>
+
+            <div className="field" style={{ marginTop: 14 }}>
               <label htmlFor="chunk">Questions per request</label>
               <input id="chunk" className="mono" type="number" min="1" max="2000" value={chunk} disabled={running}
                      onChange={(e) => setChunk(e.target.value)} />
-              <span className="hint">200 measured safe (~20k tokens). Halves automatically if TypeSafe says a request is too big.</span>
+              <span className="hint">Snaps to whole columns: {effChunk} = {effChunk / perCol} column{effChunk / perCol === 1 ? '' : 's'} of {perCol}. 200 measured safe (~20k tokens); halves automatically if a request is too big.</span>
             </div>
 
             <div className="field" style={{ marginTop: 14 }}>
@@ -340,7 +390,7 @@ export default function Page() {
                   {answeredCount > 0 && !complete ? 'Continue run' : complete ? 'Run again' : 'Run with TypeSafe'}
                 </button>
               : <button className="primary" onClick={() => { stopRef.current = true; }}>Stop</button>}
-            <button className="ghost" onClick={() => { setAnswers({}); setUsage({ input: 0, output: 0 }); setStopped(false); addLog('Cleared answers.'); }} disabled={running || !answeredCount}>Reset</button>
+            <button className="ghost" onClick={() => { setAnswers({}); setBrief(null); setUsage({ input: 0, output: 0, requests: 0 }); setStopped(false); addLog('Cleared answers and brief.'); }} disabled={running || (!answeredCount && !brief)}>Reset</button>
           </div>
         </div>
 
@@ -348,7 +398,21 @@ export default function Page() {
         <div className="stack work">
           <section className="panel drawing">
             <div className="head">
-              <h2 className="eyebrow">Drawing · {size} × {size}</h2>
+              <div className="row">
+                <h2 className="eyebrow">Drawing · {size} × {size}</h2>
+                {briefFirst && (
+                  <span className="briefchips" title="The composition Jev decided first and is told in every request">
+                    {b ? (
+                      <>
+                        <span className="chip"><i style={{ background: 'var(--ink)' }} />boundary · row {b.boundary_row}</span>
+                        {b.focal
+                          ? <span className="chip"><i style={{ background: 'var(--accent)' }} />focal · {b.x1}–{b.x2} × {b.y1}–{b.y2}</span>
+                          : <span className="chip off"><i />no focal object</span>}
+                      </>
+                    ) : <span className="chip off"><i />composition · pending</span>}
+                  </span>
+                )}
+              </div>
               <div className="row">
                 <Seg value={decode} onChange={setDecode} options={DECODES.map((d) => ({ id: d.id, label: d.label.replace(/\s*\(.*\)$/, '') }))} />
                 <button className="small" onClick={downloadPng} disabled={!answeredCount}>Download PNG</button>
@@ -367,7 +431,7 @@ export default function Page() {
             <div className="stats">
               <div className="stat"><b>{fmt(size * size)}</b><span>pixels</span></div>
               <div className="stat"><b>{fmt(answeredCount)}<small> / {fmt(keys.length)}</small></b><span>channels answered</span></div>
-              <div className="stat"><b>{fmt(requests)}</b><span>requests</span></div>
+              <div className="stat"><b>{usage.requests ? fmt(usage.requests) : fmt(requests)}</b><span>{usage.requests ? 'requests made' : 'requests planned'}</span></div>
               <div className="stat"><b>{usage.input ? fmt(usage.input) : '—'}</b><span>tokens in{usage.output ? ` · ${fmt(usage.output)} out` : ''}</span></div>
             </div>
           </section>
@@ -405,7 +469,7 @@ export default function Page() {
             {tab !== 'log' && (
               <div className="note">
                 {tab === 'request'
-                  ? <>Exactly what gets sent, one question per line. Paste <code>state</code> and <code>questions</code> into the playground, or POST the whole body to <code>/v1/systemone</code>.</>
+                  ? <>Exactly what gets sent for the picture, one question per line.{briefFirst && !brief ? ' The PLAN sentence joins the state after the brief.' : ''} Paste <code>state</code> and <code>questions</code> into the playground, or POST the whole body to <code>/v1/systemone</code>.</>
                   : answeredCount
                     ? <>Jev's values, 1–256, decoded with {decodeInfo?.label}.{complete ? '' : ' Partial: unanswered channels read 256 until the run finishes.'}</>
                     : <>Run first. This fills with <code>IMAGE EXPECTATION</code>, then <code>X1 Y1</code> → R, G, B, A, and so on.</>}
