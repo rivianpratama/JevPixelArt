@@ -1,7 +1,34 @@
-# TypeSafe Pixels
+<div align="center">
 
-A small Next.js app where TypeSafe's Jev decides every channel of every pixel
-in a pixel-art image. The code only builds the questions and draws the answers.
+<h1>TypeSafe Pixels</h1>
+
+<p>
+  <b>Jev decides every channel of every pixel.</b><br>
+  The code only builds the questions and draws the answers.
+</p>
+
+<p>
+  <a href="https://jevpixel.vercel.app/"><img alt="Live demo" src="https://img.shields.io/badge/live%20demo-jevpixel.vercel.app-000000?style=for-the-badge&logo=vercel&logoColor=white"></a>
+  <a href="https://docs.typesafe.ai/introduction"><img alt="Model: Jev" src="https://img.shields.io/badge/model-Jev%20·%20System%20One-5b5bd6?style=for-the-badge"></a>
+  <img alt="Next.js 15" src="https://img.shields.io/badge/Next.js-15-000000?style=for-the-badge&logo=nextdotjs&logoColor=white">
+</p>
+
+<table>
+  <tr>
+    <td align="center" width="33%"><b>Ask</b><br><sub>One Score question per channel<br>per pixel, values 1–256</sub></td>
+    <td align="center" width="33%"><b>Decode</b><br><sub>Sharpen each probability<br>distribution into one value</sub></td>
+    <td align="center" width="33%"><b>Draw</b><br><sub>Paint the canvas live<br>as the answers arrive</sub></td>
+  </tr>
+</table>
+
+<sub><code>X12 Y7 R</code> → <code>Score(1 … 256)</code> → one red channel. A 32×32 is 3,072 of those.</sub>
+
+</div>
+
+## Try it
+
+**[jevpixel.vercel.app](https://jevpixel.vercel.app/)** — bring a TypeSafe API key, type what
+the picture should be, pick a grid size, hit run. The key stays in your browser.
 
 ## What it does
 
@@ -69,7 +96,8 @@ Open http://localhost:3000.
 
 ## Deploy to Vercel
 
-Push this folder to a Git repo and import it at vercel.com, or:
+This repo is deployed at **[jevpixel.vercel.app](https://jevpixel.vercel.app/)**. To run your
+own, push this folder to a Git repo and import it at vercel.com, or:
 
 ```bash
 npx vercel
