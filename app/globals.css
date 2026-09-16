@@ -216,6 +216,22 @@ details.state .text { padding: 0 12px 12px; font: 12.5px/1.55 var(--mono); color
   background: var(--well);
 }
 
+/* captions over the canvas: a dark pill that fades in, holds, fades out */
+.caption {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  padding: 24px; pointer-events: none; text-align: center;
+}
+.caption span {
+  max-width: 82%; padding: 12px 18px; border-radius: 12px;
+  background: rgba(21, 25, 34, .78); color: #fff;
+  -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  font: 600 clamp(16px, 2.1vw, 24px)/1.3 var(--sans); letter-spacing: -.01em; text-wrap: balance;
+  opacity: 0; transform: translateY(8px) scale(.98);
+  transition: opacity .32s ease, transform .32s ease;
+}
+.caption span.show { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) { .caption span { transition: none; } }
+
 .progress { height: 6px; background: var(--well); border-radius: 999px; overflow: hidden; }
 .progress > i { display: block; height: 100%; background: var(--accent); transition: width .25s; }
 

@@ -10,6 +10,15 @@ const SIZES = [8, 12, 16, 24, 32, 48, 64];
 const CHANNEL_COLOR = { R: 'var(--r)', G: 'var(--g)', B: 'var(--b)', A: 'var(--ink)' };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Reveal: answered pixels queue up and pop in at a steady pace, in the order they were asked,
+// so the picture sweeps in smoothly even though the API answers in bursts.
+const REVEAL_RATE = 55;          // pixels per second
+const REVEAL_MS = 420;           // one pixel's pop-in
+const CAPTION_HOLD = 1500;       // ms a caption stays fully visible
+const CAPTION_HOLD_BUSY = 800;   // shorter when more captions are waiting, so they catch up
+const CAPTION_FADE = 320;        // ms for its fade in / out
+const reduceMotion = () => typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
 function download(name, data, type) {
   const blob = data instanceof Blob ? data : new Blob([data], { type });
   const a = document.createElement('a');
@@ -33,34 +42,6 @@ function usePersisted(key, initial) {
     });
   }, [key]);
   return [value, set];
-}
-
-// Paint a pixel dict onto a canvas, nearest-neighbour. Unanswered pixels get a light checker.
-function paint(canvas, pixels, size, chans, answers, cssMax) {
-  const scale = Math.max(1, Math.floor(cssMax / size));
-  canvas.width = size * scale;
-  canvas.height = size * scale;
-  const ctx = canvas.getContext('2d');
-  const img = ctx.createImageData(size, size);
-  for (let y = 1; y <= size; y++) {
-    for (let x = 1; x <= size; x++) {
-      const i = ((y - 1) * size + (x - 1)) * 4;
-      const done = [...chans].every((ch) => answers[`X${x} Y${y} ${ch}`]);
-      if (done) {
-        const p = pixels[`X${x} Y${y}`];
-        img.data[i] = p.R - 1; img.data[i + 1] = p.G - 1; img.data[i + 2] = p.B - 1; img.data[i + 3] = p.A - 1;
-      } else {
-        const g = (x + y) % 2 ? 224 : 236;
-        img.data[i] = g; img.data[i + 1] = g + 1; img.data[i + 2] = g + 3; img.data[i + 3] = 255;
-      }
-    }
-  }
-  const off = document.createElement('canvas');
-  off.width = size; off.height = size;
-  off.getContext('2d').putImageData(img, 0, 0);
-  ctx.imageSmoothingEnabled = false;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
 }
 
 const Chevron = ({ open }) => (
@@ -109,10 +90,13 @@ export default function Page() {
   const [brief, setBrief] = useState(null);        // { answers, brief, text } after phase 1
   const [answers, setAnswers] = useState({});
   const [running, setRunning] = useState(false);
+  const [revealing, setRevealing] = useState(false);
   const [stopped, setStopped] = useState(false);
   const [usage, setUsage] = useState({ input: 0, output: 0, requests: 0 });
   const [log, setLog] = useState([]);
   const [tab, setTab] = useState('request');
+  const [caption, setCaption] = useState(null);
+  const [captionOn, setCaptionOn] = useState(false);
   const [panels, setPanels] = usePersisted('tp_panels', { key: true, picture: true, model: true });
   const [drawer, setDrawer] = usePersisted('tp_drawer', false);
   const stopRef = useRef(false);
@@ -134,12 +118,6 @@ export default function Page() {
   const keys = useMemo(() => Object.keys(questions), [questions]);
   const requestJson = useMemo(() => requestJsonString(state, questions), [state, questions]);
 
-  // Changing the picture, the grid, the prompt or the brief setting changes what every question means,
-  // so answers and brief reset. Changing the decoder does not: it re-reads the answers you already paid for.
-  useEffect(() => {
-    setAnswers({}); setBrief(null); setUsage({ input: 0, output: 0, requests: 0 }); setStopped(false);
-  }, [size, chans, expectation, prompt, briefFirst]);
-
   const answeredCount = useMemo(() => keys.reduce((n, k) => n + (answers[k] ? 1 : 0), 0), [keys, answers]);
   const complete = keys.length > 0 && answeredCount === keys.length;
   const pixels = useMemo(() => rebuild(answers, expectation, size, decode), [answers, expectation, size, decode]);
@@ -150,9 +128,143 @@ export default function Page() {
     setLog((l) => [...l.slice(-199), `[${t}] ${m}`]);
   }, []);
 
+  function fmt(n) { return n.toLocaleString(); }
+
+  // ---------- captions over the canvas: queued, each fades in, holds, fades out ----------
+  const capQueue = useRef([]);
+  const capBusy = useRef(false);
+  const pumpRef = useRef(null);
+  pumpRef.current = () => {
+    if (capBusy.current || !capQueue.current.length) return;
+    capBusy.current = true;
+    setCaption(capQueue.current.shift());
+    const hold = capQueue.current.length ? CAPTION_HOLD_BUSY : CAPTION_HOLD;
+    requestAnimationFrame(() => setCaptionOn(true));
+    setTimeout(() => setCaptionOn(false), CAPTION_FADE + hold);
+    setTimeout(() => { setCaption(null); capBusy.current = false; pumpRef.current(); }, CAPTION_FADE * 2 + hold);
+  };
+  const say = useCallback((text) => { capQueue.current.push(text); pumpRef.current(); }, []);
+
+  // "Done" waits for the last pixel to land, not for the last API response.
+  const pendingDone = useRef(null);
+  function flushDone() {
+    if (pendingDone.current == null) return;
+    const { secs, n } = pendingDone.current;
+    pendingDone.current = null;
+    say(`Done · ${fmt(n)} pixels in ${secs} s`);
+  }
+
+  // ---------- the reveal: draw loop over a queue of newly answered pixels ----------
+  const latest = useRef({});
+  latest.current = { pixels, answers, size, chans };
+  // queue items are { k, at }: each pixel has an absolute reveal time, so a throttled tab catches up to the clock.
+  const anim = useRef({ revealed: new Map(), queue: [], queued: new Set(), raf: 0, nextAt: 0 });
+
+  const drawRef = useRef(null);
+  drawRef.current = (now = performance.now()) => {
+    const c = canvasRef.current;
+    if (!c) return;
+    const { pixels, size } = latest.current;
+    const a = anim.current;
+    const scale = Math.max(1, Math.floor(512 / size));
+    if (c.width !== size * scale) { c.width = size * scale; c.height = size * scale; }
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, c.width, c.height);
+    for (let y = 1; y <= size; y++) {
+      for (let x = 1; x <= size; x++) {
+        const px = (x - 1) * scale;
+        const py = (y - 1) * scale;
+        const g = (x + y) % 2 ? 224 : 236;
+        ctx.fillStyle = `rgb(${g},${g + 1},${g + 3})`;
+        ctx.fillRect(px, py, scale, scale);
+        const t = a.revealed.get(`X${x} Y${y}`);
+        if (t === undefined) continue;
+        const q = pixels[`X${x} Y${y}`];
+        const p = Math.min(1, (now - t) / REVEAL_MS);
+        const e = 1 - Math.pow(1 - p, 3);
+        const s = scale * (0.55 + 0.45 * e);
+        const o = (scale - s) / 2;
+        ctx.globalAlpha = e * ((q.A - 1) / 255);
+        ctx.fillStyle = `rgb(${q.R - 1},${q.G - 1},${q.B - 1})`;
+        ctx.fillRect(px + o, py + o, s, s);
+        if (p < 0.4) {                                   // a brief flash as it lands
+          ctx.globalAlpha = (0.4 - p) * 1.1;
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(px + o, py + o, s, s);
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
+  };
+
+  function loop(now) {
+    const a = anim.current;
+    while (a.queue.length && a.queue[0].at <= now) {       // reveal whatever is due on the wall clock
+      const { k, at } = a.queue.shift();
+      a.queued.delete(k);
+      a.revealed.set(k, at);
+    }
+    drawRef.current(now);
+    let animating = false;
+    for (const t of a.revealed.values()) if (now - t < REVEAL_MS) { animating = true; break; }
+    if (a.queue.length || animating) {
+      a.raf = requestAnimationFrame(loop);
+    } else {
+      a.raf = 0;
+      setRevealing(false);
+      flushDone();
+    }
+  }
+  function startLoop() {
+    const a = anim.current;
+    if (!a.raf) { setRevealing(true); a.raf = requestAnimationFrame(loop); }
+  }
+  function clearReveal() {
+    const a = anim.current;
+    a.revealed.clear(); a.queue = []; a.queued = new Set(); a.nextAt = 0;
+    pendingDone.current = null;
+  }
+  function allRevealed() {
+    const a = anim.current;
+    for (let x = 1; x <= size; x++) for (let y = 1; y <= size; y++) if (!a.revealed.has(`X${x} Y${y}`)) return false;
+    return true;
+  }
+
+  // Newly complete pixels join the queue in the order they were asked, each with its own reveal time,
+  // spaced 1/REVEAL_RATE apart. Anything no longer complete is dropped.
   useEffect(() => {
-    if (canvasRef.current) paint(canvasRef.current, pixels, size, chans, answers, 512);
-  }, [answers, pixels, size, chans]);
+    const a = anim.current;
+    const isComplete = (k) => [...chans].every((ch) => answers[`${k} ${ch}`]);
+    for (const k of [...a.revealed.keys()]) if (!isComplete(k)) a.revealed.delete(k);
+    a.queue = a.queue.filter((item) => isComplete(item.k));
+    a.queued = new Set(a.queue.map((item) => item.k));
+    const instant = reduceMotion();
+    const now = performance.now();
+    a.nextAt = Math.max(a.nextAt, now);
+    for (let x = 1; x <= size; x++) {
+      for (let y = 1; y <= size; y++) {
+        const k = `X${x} Y${y}`;
+        if (isComplete(k) && !a.revealed.has(k) && !a.queued.has(k)) {
+          if (instant) {
+            a.revealed.set(k, 0);
+          } else {
+            a.nextAt += 1000 / REVEAL_RATE;
+            a.queue.push({ k, at: a.nextAt });
+            a.queued.add(k);
+          }
+        }
+      }
+    }
+    if (a.queue.length) startLoop();
+    else { drawRef.current(); if (!a.raf) flushDone(); }
+  }, [answers, size, chans, pixels]);   // pixels too: a decoder switch recolours what is already revealed
+
+  // Changing the picture, the grid, the prompt or the brief setting changes what every question means,
+  // so answers and brief reset. Changing the decoder does not: it re-reads the answers you already paid for.
+  useEffect(() => {
+    clearReveal();
+    setAnswers({}); setBrief(null); setUsage({ input: 0, output: 0, requests: 0 }); setStopped(false);
+  }, [size, chans, expectation, prompt, briefFirst]);
 
   // Send a set of questions against one state, in chunks that hold whole columns. Returns what was answered.
   async function sendAll(stateText, qs, perCol, startChunk, have, isPaint) {
@@ -211,11 +323,13 @@ export default function Page() {
   }
 
   async function run() {
-    if (!apiKey.trim()) { addLog('Add your TypeSafe API key first.'); setTab('log'); setDrawer(true); return; }
+    if (!apiKey.trim()) { addLog('Add your TypeSafe API key first.'); say('Add your TypeSafe API key first'); setTab('log'); setDrawer(true); return; }
     setRunning(true);
     setStopped(false);
     setTab('log');
     stopRef.current = false;
+    const t0 = performance.now();
+    if (!answeredCount) say(`“${expectation}”`);
 
     let planText = brief?.text ?? null;
 
@@ -223,29 +337,36 @@ export default function Page() {
     if (briefFirst && !brief) {
       const pState = buildState(expectation, size, chans, prompt);
       addLog('Deciding the composition: five questions, one request.');
+      say('Jev decides the composition');
       const n = Object.keys(BRIEF_QUESTIONS).length;
       const { local, ok } = await sendAll(pState, BRIEF_QUESTIONS, n, n, {}, false);
       if (!ok || Object.keys(BRIEF_QUESTIONS).some((k) => !local[k])) {
-        if (stopRef.current) { setStopped(true); addLog('Stopped during the brief.'); }
+        if (stopRef.current) { setStopped(true); addLog('Stopped during the brief.'); say('Paused'); }
         setRunning(false); return;
       }
       const b = briefFromAnswers(local, size);
       planText = buildBriefText(b, size);
       setBrief({ answers: local, brief: b, text: planText });
-      addLog(`Composition: main boundary at row ${b.boundary_row}${b.focal
-        ? `; focal object at columns ${b.x1}–${b.x2}, rows ${b.y1}–${b.y2}` : '; no single focal object'}. `
-        + `About ${Math.round(planText.length / 4)} tokens added to each request.`);
+      const where = b.focal ? ` · focal point at ${b.x1}–${b.x2} × ${b.y1}–${b.y2}` : ' · no single focal object';
+      addLog(`Composition: main boundary at row ${b.boundary_row}${where}. About ${Math.round(planText.length / 4)} tokens added to each request.`);
+      say(`Composition set · boundary at row ${b.boundary_row}${where}`);
     }
 
     // Phase 2: the picture.
     const fState = buildState(expectation, size, chans, prompt, planText);
     const todo = keys.filter((k) => !answers[k]);
     addLog(`Painting ${todo.length} questions (${size}×${size}, ${chans}, ${prompt}${planText ? ', with brief' : ''}).`);
+    say(`Painting ${fmt(size * size)} pixels, one channel at a time`);
     const { local } = await sendAll(fState, questions, size * chans.length, Math.floor(Number(chunk)) || 200, answers, true);
     setAnswers(local);
 
-    if (stopRef.current) { setStopped(true); addLog('Stopped. Run again to continue where you left off.'); }
-    else if (keys.every((k) => local[k])) addLog('Done. Jev has answered every pixel.');
+    if (stopRef.current) { setStopped(true); addLog('Stopped. Run again to continue where you left off.'); say('Paused'); }
+    else if (keys.every((k) => local[k])) {
+      const secs = Math.max(1, Math.round((performance.now() - t0) / 1000));
+      addLog('Done. Jev has answered every pixel.');
+      pendingDone.current = { secs, n: size * size };
+      if (!anim.current.raf && allRevealed()) flushDone();      // otherwise the reveal loop says it when the last pixel lands
+    }
     setRunning(false);
   }
 
@@ -264,9 +385,9 @@ export default function Page() {
   const requests = Math.ceil(keys.length / effChunk) + (briefFirst ? 1 : 0);
   const pct = keys.length ? Math.round((answeredCount / keys.length) * 100) : 0;
   const decodeInfo = DECODES.find((d) => d.id === decode);
-  const statusClass = running ? 'painting' : complete ? 'complete' : '';
-  const statusText = running ? (briefFirst && !brief ? 'deciding' : 'painting') : complete ? 'complete' : stopped ? 'paused' : answeredCount ? 'partial' : 'idle';
-  const fmt = (n) => n.toLocaleString();
+  const busy = running || revealing;
+  const statusClass = busy ? 'painting' : complete ? 'complete' : '';
+  const statusText = running && briefFirst && !brief ? 'deciding' : busy ? 'painting' : complete ? 'complete' : stopped ? 'paused' : answeredCount ? 'partial' : 'idle';
   const b = brief?.brief;
 
   return (
@@ -390,7 +511,7 @@ export default function Page() {
                   {answeredCount > 0 && !complete ? 'Continue run' : complete ? 'Run again' : 'Run with TypeSafe'}
                 </button>
               : <button className="primary" onClick={() => { stopRef.current = true; }}>Stop</button>}
-            <button className="ghost" onClick={() => { setAnswers({}); setBrief(null); setUsage({ input: 0, output: 0, requests: 0 }); setStopped(false); addLog('Cleared answers and brief.'); }} disabled={running || (!answeredCount && !brief)}>Reset</button>
+            <button className="ghost" onClick={() => { clearReveal(); setAnswers({}); setBrief(null); setUsage({ input: 0, output: 0, requests: 0 }); setStopped(false); addLog('Cleared answers and brief.'); }} disabled={running || (!answeredCount && !brief)}>Reset</button>
           </div>
         </div>
 
@@ -419,7 +540,12 @@ export default function Page() {
               </div>
             </div>
             <div className="body stage">
-              <div className="plate"><canvas ref={canvasRef} aria-label="Jev's pixels" /></div>
+              <div className="plate">
+                <canvas ref={canvasRef} aria-label="Jev's pixels" />
+                <div className="caption" aria-live="polite">
+                  {caption && <span className={captionOn ? 'show' : ''}>{caption}</span>}
+                </div>
+              </div>
               <div className="row between" style={{ marginTop: 14, marginBottom: 6 }}>
                 <span className="hint" style={{ fontSize: 12, color: 'var(--muted)' }}>
                   <b style={{ color: 'var(--ink)', fontWeight: 500 }}>{decodeInfo?.label}.</b> {decodeInfo?.hint} Switching re-decodes the answers you already have; no new requests.

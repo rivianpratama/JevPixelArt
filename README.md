@@ -13,6 +13,11 @@ in a pixel-art image. The code only builds the questions and draws the answers.
    with copy/download. Paste into `console.typesafe.ai/playground` or POST it.
 5. **Drawing** – a canvas that fills in live as answers arrive, plus PNG export,
    and the **Pixel JSON** (`IMAGE EXPECTATION`, then `X1 Y1 → R, G, B, A`).
+   Made to be screen-recorded: answered pixels pop in at a steady ~55 px/s in
+   the order they were asked (a left-to-right sweep, smooth even though the API
+   answers in bursts), and captions fade in and out over the canvas narrating
+   the run: your prompt, "Jev decides the composition", the decision, painting
+   progress, and "Done" when the last pixel lands. Respects reduced motion.
 
 ## The protocol (no hints to the model)
 
