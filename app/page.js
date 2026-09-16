@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  LEVELS, MODEL, channelsFor, buildState, buildQuestions, rebuild, requestJsonString,
+  LEVELS, MODEL, PROMPTS, DECODES, channelsFor, buildState, buildQuestions, rebuild, requestJsonString,
 } from '../lib/pixels';
 
 const SIZES = [8, 12, 16, 24, 32, 48, 64];
@@ -22,7 +22,9 @@ export default function Page() {
   const [showKey, setShowKey] = useState(false);
   const [expectation, setExpectation] = useState('a pixel art sunset over a beach');
   const [size, setSize] = useState(16);
-  const [alpha, setAlpha] = useState(true);
+  const [alpha, setAlpha] = useState(false);
+  const [prompt, setPrompt] = useState('bold');
+  const [decode, setDecode] = useState('sharp3');
   const [chunk, setChunk] = useState(200);
   const [answers, setAnswers] = useState({});
   const [running, setRunning] = useState(false);
@@ -40,17 +42,18 @@ export default function Page() {
   }, [apiKey]);
 
   const chans = channelsFor(alpha);
-  const state = useMemo(() => buildState(expectation, size, chans), [expectation, size, chans]);
-  const questions = useMemo(() => buildQuestions(size, chans), [size, chans]);
+  const state = useMemo(() => buildState(expectation, size, chans, prompt), [expectation, size, chans, prompt]);
+  const questions = useMemo(() => buildQuestions(size, chans, prompt), [size, chans, prompt]);
   const keys = useMemo(() => Object.keys(questions), [questions]);
   const requestJson = useMemo(() => requestJsonString(state, questions), [state, questions]);
 
-  // Changing the picture or the grid changes what every question means, so answers reset.
-  useEffect(() => { setAnswers({}); }, [size, chans, expectation]);
+  // Changing the picture, the grid or the prompt changes what every question means, so answers reset.
+  // Changing the decoder does not: it re-reads the answers you already paid for.
+  useEffect(() => { setAnswers({}); }, [size, chans, expectation, prompt]);
 
   const answeredCount = useMemo(() => keys.reduce((n, k) => n + (answers[k] ? 1 : 0), 0), [keys, answers]);
   const complete = keys.length > 0 && answeredCount === keys.length;
-  const pixels = useMemo(() => rebuild(answers, expectation, size), [answers, expectation, size]);
+  const pixels = useMemo(() => rebuild(answers, expectation, size, decode), [answers, expectation, size, decode]);
   const pixelJson = useMemo(() => JSON.stringify(pixels, null, 1), [pixels]);
 
   const addLog = useCallback((m) => {
@@ -96,10 +99,12 @@ export default function Page() {
     let cur = Math.max(1, Math.floor(Number(chunk)) || 200);
     let local = { ...answers };
     const todo = keys.filter((k) => !local[k]);
-    addLog(`Sending ${todo.length} questions (${size}x${size}, ${chans}) in chunks of ${cur}.`);
+    addLog(`Sending ${todo.length} questions (${size}x${size}, ${chans}, ${prompt}) in chunks of ${cur}.`);
 
     let i = 0;
     let delay = 2000;
+    let tokensIn = 0;
+    let tokensOut = 0;
     while (i < todo.length && !stopRef.current) {
       const batchKeys = todo.slice(i, i + cur);
       const batch = {};
@@ -140,12 +145,14 @@ export default function Page() {
       i += batchKeys.length;
       delay = 2000;
       const u = data.usage || {};
+      tokensIn += u.input_tokens || 0;
+      tokensOut += u.output_tokens || 0;
       const n = keys.reduce((c, k) => c + (local[k] ? 1 : 0), 0);
       addLog(`${n}/${keys.length} answered · chunk ${cur} · tokens in ${u.input_tokens ?? '?'} out ${u.output_tokens ?? '?'}`);
     }
 
     if (stopRef.current) addLog('Stopped. Run again to continue where you left off.');
-    else if (keys.every((k) => local[k])) addLog('Done. Jev has answered every pixel.');
+    else if (keys.every((k) => local[k])) addLog(`Done. Jev has answered every pixel. Total tokens in ${tokensIn}, out ${tokensOut}.`);
     setRunning(false);
   }
 
@@ -153,7 +160,7 @@ export default function Page() {
     try { await navigator.clipboard.writeText(s); addLog(`Copied ${what} to the clipboard.`); }
     catch { addLog('The browser blocked the clipboard. Use Download instead.'); }
   };
-  const downloadPng = () => canvasRef.current?.toBlob((b) => b && download(`pixels_${size}x${size}.png`, b));
+  const downloadPng = () => canvasRef.current?.toBlob((b) => b && download(`pixels_${size}x${size}_${decode}.png`, b));
 
   const preview = (s) => (s.length > 4000
     ? `${s.slice(0, 4000)}\n… ${(s.length / 1024).toFixed(0)} KB total. Use Copy or Download for the whole file.`
@@ -161,6 +168,7 @@ export default function Page() {
 
   const requests = Math.ceil(keys.length / Math.max(1, Math.floor(Number(chunk)) || 1));
   const pct = keys.length ? Math.round((answeredCount / keys.length) * 100) : 0;
+  const decodeInfo = DECODES.find((d) => d.id === decode);
 
   return (
     <main className="wrap">
@@ -177,7 +185,7 @@ export default function Page() {
             <label htmlFor="key">TypeSafe API key</label>
             <div className="row">
               <input id="key" type={showKey ? 'text' : 'password'} value={apiKey} disabled={running}
-                     onChange={(e) => setApiKey(e.target.value)} placeholder="ts_…" style={{ flex: 1 }}
+                     onChange={(e) => setApiKey(e.target.value)} placeholder="api…" style={{ flex: 1 }}
                      autoComplete="off" />
               <button className="small" type="button" onClick={() => setShowKey((v) => !v)}>
                 {showKey ? 'Hide' : 'Show'}
@@ -188,6 +196,7 @@ export default function Page() {
             <label htmlFor="exp">Image expectation</label>
             <input id="exp" type="text" value={expectation} disabled={running}
                    onChange={(e) => setExpectation(e.target.value)} />
+            <div className="hint">The only words the model gets about the picture. Name the features you want placed (a sun on the horizon, a strip of sand) and it has something to put where.</div>
 
             <label htmlFor="size">Grid size</label>
             <select id="size" value={size} disabled={running} onChange={(e) => setSize(Number(e.target.value))}>
@@ -202,10 +211,15 @@ export default function Page() {
               <label htmlFor="alpha" style={{ margin: 0 }}>Include alpha (A). Off = fully opaque, a quarter fewer questions.</label>
             </div>
 
+            <label htmlFor="prompt">Prompt style</label>
+            <select id="prompt" value={prompt} disabled={running} onChange={(e) => setPrompt(e.target.value)}>
+              {PROMPTS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+            </select>
+
             <label htmlFor="chunk">Questions per request</label>
             <input id="chunk" type="number" min="1" max="2000" value={chunk} disabled={running}
                    onChange={(e) => setChunk(e.target.value)} />
-            <div className="hint">Halves automatically if TypeSafe says a request is too big.</div>
+            <div className="hint">200 measured safe (~20k tokens). Halves automatically if TypeSafe says a request is too big.</div>
 
             <div className="stats">
               <b>{size} × {size}</b> = {size * size} pixels · <b>{keys.length}</b> questions · about <b>{requests}</b> requests<br />
@@ -225,7 +239,7 @@ export default function Page() {
           <section className="card">
             <h2>What the model is told (state)</h2>
             <div className="state">{state}</div>
-            <div className="hint">Nothing about what any pixel should look like. Each question is only its coordinate and channel, e.g. <code>X1 Y1 R</code>.</div>
+            <div className="hint">Nothing about what any pixel should look like beyond your expectation. Each question is only its coordinate and channel.</div>
           </section>
         </div>
 
@@ -240,6 +254,14 @@ export default function Page() {
               {answeredCount}/{keys.length} channels answered ({pct}%){complete ? ' · complete' : running ? ' · painting…' : ''}
             </div>
             <div className="canvasWrap"><canvas ref={canvasRef} /></div>
+
+            <div className="row" style={{ marginTop: 12 }}>
+              <label htmlFor="decode" style={{ margin: 0, whiteSpace: 'nowrap' }}>Decode</label>
+              <select id="decode" value={decode} onChange={(e) => setDecode(e.target.value)} style={{ flex: 1 }}>
+                {DECODES.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
+              </select>
+            </div>
+            <div className="hint">{decodeInfo?.hint} Re-decodes the answers you already have. No new requests.</div>
           </section>
 
           <section className="card">
@@ -257,7 +279,7 @@ export default function Page() {
                 ) : (
                   <>
                     <button className="small" onClick={() => copy(pixelJson, 'the pixel JSON')} disabled={!answeredCount}>Copy</button>
-                    <button className="small" onClick={() => download(`pixels_${size}x${size}.json`, pixelJson, 'application/json')} disabled={!answeredCount}>Download</button>
+                    <button className="small" onClick={() => download(`pixels_${size}x${size}_${decode}.json`, pixelJson, 'application/json')} disabled={!answeredCount}>Download</button>
                   </>
                 )}
               </div>
@@ -273,7 +295,7 @@ export default function Page() {
               <>
                 <div className="hint" style={{ marginTop: 8 }}>
                   {answeredCount
-                    ? `Jev's values, 1-256. ${complete ? '' : 'Partial: unanswered channels read 256 until the run finishes.'}`
+                    ? `Jev's values, 1-256, decoded with ${decodeInfo?.label}. ${complete ? '' : 'Partial: unanswered channels read 256 until the run finishes.'}`
                     : 'Run first. This fills with IMAGE EXPECTATION, then X1 Y1 → R, G, B, A, and so on.'}
                 </div>
                 <pre>{answeredCount ? preview(pixelJson) : ''}</pre>

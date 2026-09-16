@@ -20,7 +20,17 @@ in a pixel-art image. The code only builds the questions and draws the answers.
   what any pixel should look like.
 - One **Score** question per channel per pixel. Instructions are just `X1 Y1 R`.
   Criteria are 10 anchors across 1–256 (TypeSafe's maximum levels).
-- Rebuild a channel: `value = 1 + score * 255 / 9`.
+- Rebuild a channel from Jev's probability distribution. Default **sharpen³**:
+  raise each anchor's probability to the 3rd power, renormalise, average.
+  Measured at 16×16, Jev's distributions are flat (confidence ≈ 0.1, no anchor
+  ever above 50%), so the plain weighted mean collapses to muddy midtones;
+  sharpening restores bold, flat pixel-art colour without argmax's coin-toss
+  pixels. Switch decoders live in the UI, no new requests.
+- Three prompt styles, none describing the scene: `lean` (bare protocol),
+  `tuned` (explains what the numbers mean, asks Jev to decide the whole picture
+  first), `bold` (tuned + a pixel-art style instruction). Measured saturation at
+  16×16, mean-decoded: 29 → 79 → 85; bold + sharpen³ ≈ 163. The scene features
+  themselves (a sun, a sand strip) come from the **image expectation** field.
 
 ## Why the browser loops instead of the server
 
